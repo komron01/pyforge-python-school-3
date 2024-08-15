@@ -1,9 +1,14 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from rdkit import Chem
+from os import getenv
 
 app = FastAPI()
 
 molecules = dict() 
+
+@app.get("/")
+def get_server():
+    return {"server_id": getenv("SERVER_ID", "1")}
 
 #Get molecule by identifier
 @app.get("/molecules/{identifier}")
