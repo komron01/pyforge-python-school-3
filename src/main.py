@@ -1,114 +1,55 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from rdkit import Chem
-from os import getenv
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from sqlalchemy.orm import Session
+from .schema import Drug, SessionLocal, DrugResponse, DrugAdd
 
 app = FastAPI()
 
-molecules = dict() 
-
-@app.get("/")
-def get_server():
-    return {"server_id": getenv("SERVER_ID", "1")}
-
-#Get molecule by identifier
-@app.get("/molecules/{identifier}")
-def get_molecule(identifier):
-    if identifier not in molecules:
-        raise HTTPException(status_code=404, detail="molecule not found")
-    return {"identifier": identifier, "smiles": molecules[identifier]}
-
-# Add molecule (smiles) and its identifier
-@app.post("/add")
-def add_molecule(identifier, smiles):
-    if identifier in molecules:
-        raise HTTPException(status_code=400, detail="molecule identifier already exists")
-    molecules[identifier] = smiles
-    return {"identifier": identifier, "smiles": smiles}
-
-#Updating a molecule by identifier
-@app.put("/molecules/{identifier}")
-def update_molecule(identifier, smiles):
-    if identifier not in molecules:
-        raise HTTPException(status_code=404, detail="molecule not found")
-    molecules[identifier] = smiles
-    return {"identifier": identifier, "smiles": smiles}
-
-#Delete a molecule by identifier
-@app.delete("/molecules/{identifier}")
-def delete_molecule(identifier):
-    if identifier not in molecules:
-        raise HTTPException(status_code=404, detail="molecule not found")
-    temp_molecule = molecules[identifier]
-    del molecules[identifier]
-    return {"detail": temp_molecule + " with identifier "+identifier+" is deleted"}
-
-#List all molecules
-@app.get("/molecules/")
-def list_molecules():
-    if not molecules:
-        return {"detail": "no molecules found"}
-    return [{"identifier": identifier, "smiles": smiles} for identifier, smiles in molecules.items()]
-
-# @app.post("/molecules/search/")
-def substructure_search(mols, mol):
-
-    substructure = Chem.MolFromSmiles(mol) #convering into smiles
-    if substructure is None:
-        raise ValueError("Invalid substructure SMILES string") # IF WE CAN'T convert into SMILES we'll get exception
-    matched_molecules = [] #storing matches here
-    for smiles in mols: #iterating through the given list
-        molecule = Chem.MolFromSmiles(smiles)
-        if molecule is None:
-            continue  # Skip invalid SMILES strings
-        if molecule.HasSubstructMatch(substructure): 
-            matched_molecules.append(smiles)
-    return matched_molecules
-
-@app.post("/molecules/search/")
-def substructure_search_api(substructure):
-    if not molecules:
-        return {"detail": "No molecules available for search"}
-    matches = substructure_search(list(molecules.values()), substructure)
-    matched_identifiers = [
-        {"identifier": identifier, "smiles": smiles}
-        for identifier, smiles in molecules.items()
-        if smiles in matches
-    ]
-    if not matched_identifiers:
-        return {"detail": "No matches found"}
-    return matched_identifiers
-'''
-Uploading the file is little bit complex here.
-I'll be using here txt file to upload with the strict format:
-identifier:mol
-mol1:CCO
-mol2:CC(=O)Oc1ccccc1C(=O)O
-...
-Also, I'm using the async function because I need to make sure that program read the file and only then 
-goes further.
-'''
-async def upload_molecules(file: UploadFile): 
-    if file.content_type != 'text/plain':
-        raise HTTPException(status_code=400, detail="Invalid file format. Only text files are supported.")
-    
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
     try:
-        content = await file.read()
-        lines = content.decode('utf-8').splitlines()
-        for line in lines:
-            if not line.strip():
-                continue  # skipping empty lines
-            try:
-                identifier, smiles = line.split(':')
-                if identifier in molecules:
-                    continue  # skipping if the molecule identifier already exists
-                molecules[identifier.strip()] = smiles.strip()
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid file format. Each line must be 'identifier:SMILES'")
-        
-        return {"detail": "Molecules uploaded successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        yield db
+    finally:
+        db.close()
 
-@app.post("/molecules/upload/")
-async def upload_molecules_endpoint(file: UploadFile = File(...)):
-    return await upload_molecules(file)
+@app.post("/add")
+def add_molecule(molecule: DrugAdd, db: Session = Depends(get_db)):
+    db_molecule = db.query(Drug).filter(Drug.name == molecule.name).first()
+    if db_molecule:
+        raise HTTPException(status_code=400, detail="Molecule identifier already exists")
+    new_molecule = Drug(name=molecule.name, smiles=molecule.smiles)
+    db.add(new_molecule)
+    db.commit()
+    db.refresh(new_molecule)
+    return DrugResponse(id=new_molecule.id, name=new_molecule.name, smiles=new_molecule.smiles)
+
+@app.get("/molecules/{identifier}")
+def get_molecule(identifier: int, db: Session = Depends(get_db)):
+    molecule = db.query(Drug).filter(Drug.id == identifier).first()
+    if not molecule:
+        raise HTTPException(status_code=404, detail="Molecule not found")
+    return DrugResponse(id=molecule.id, name=molecule.name, smiles=molecule.smiles)
+
+@app.put("/molecules/{identifier}")
+def update_molecule(identifier: int, molecule: DrugAdd, db: Session = Depends(get_db)):
+    db_molecule = db.query(Drug).filter(Drug.id == identifier).first()
+    if not db_molecule:
+        raise HTTPException(status_code=404, detail="Molecule not found")
+    db_molecule.name = molecule.name
+    db_molecule.smiles = molecule.smiles
+    db.commit()
+    return DrugResponse(id=db_molecule.id, name=db_molecule.name, smiles=db_molecule.smiles)
+
+@app.delete("/molecules/{identifier}")
+def delete_molecule(identifier: int, db: Session = Depends(get_db)):
+    db_molecule = db.query(Drug).filter(Drug.id == identifier).first()
+    if not db_molecule:
+        raise HTTPException(status_code=404, detail="Molecule not found")
+    db.delete(db_molecule)
+    db.commit()
+    return {"detail": f"Molecule with identifier {identifier} is deleted"}
+
+@app.get("/molecules/")
+def list_molecules(db: Session = Depends(get_db)):
+    molecules = db.query(Drug).all()
+    return [DrugResponse(id=molecule.id, name=molecule.name, smiles=molecule.smiles) for molecule in molecules]
